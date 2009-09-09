@@ -1,0 +1,162 @@
+#!/usr/bin/perl -w
+
+# Creates a tar backup of a filesystem based on
+# rules in a configuration file. Please note that
+# by default NOTHING is backed up, you need to explicitly 
+# specify the files to add to the backup.
+#
+# By default the configuration is loaded from /etc/nbackup.conf,
+# this can be overridden with a command line parameter.
+
+
+use strict;
+use Archive::Tar qw//;
+use POSIX qw/strftime/;
+use File::Find qw/find/;
+use Sys::Hostname qw/hostname/;
+use Getopt::Std qw/getopts/;
+use File::Basename qw/basename dirname/;
+
+my %VARS = (
+    HOSTNAME => hostname(),
+);
+
+my %opts = ();
+getopts('c:o', \%opts);
+
+main(@ARGV);
+
+sub main {
+    my $backup = load_backup_config($opts{c}||'/etc/nbackup.conf');
+
+    unless (-d $backup->{cfg}->{destination}) {
+	mkdir $backup->{cfg}->{destination}, 0755 or die "Could not create `$backup->{cfg}->{destination}': $!";
+    }
+
+    my $outfilename = sprintf('%s/%s', $backup->{cfg}->{destination}, strftime($backup->{cfg}->{nameformat}, localtime()));
+
+    foreach my $key (keys %VARS) {
+	$outfilename =~ s/$key/$VARS{$key}/g;
+    }
+
+    my $tar = Archive::Tar->new();
+
+    my %files = ();
+
+    foreach my $file (keys %{$backup->{add}}) {
+	find(
+	    sub {
+		my $curfile = $File::Find::name;
+
+		if ($backup->{exclude}->{$curfile}) {
+		    $File::Find::prune = 1;
+		    return;
+		}
+
+		foreach my $test (keys %{$backup->{match_exclude}}) {
+		    return if $curfile =~ /$test/;
+		}
+
+		#$tar->add_files($curfile);
+		$files{$curfile} = 1;
+	    }, 
+	    $file
+	);
+    }
+
+    foreach my $file (keys %files) {
+	if (-l $file) {
+	    my $realfile = readlink $file;
+	    unless ($files{$realfile}) {
+		my $dir = dirname $file;
+	    }
+	}
+
+	$tar->add_files($file);
+    }
+
+    $tar->write($outfilename, 1);	
+
+    my $prune_time = calc_prune($backup->{cfg}->{prune});
+
+    if ($prune_time) {
+	my $oldest = time() - $prune_time;	
+
+	find(
+	    sub {
+		my $curfile = $File::Find::name;
+
+		my $mtime = (stat $curfile)[9];
+
+		if ($mtime < $oldest) {
+		    unlink $curfile or warn "Could not remove `$curfile': $!";
+		}
+	    },
+	    $backup->{cfg}->{destination}
+	);
+    }
+    
+    print "$outfilename\n" if $opts{o};
+}
+
+sub load_backup_config {
+    my $config_file = shift;
+
+    my $backup = {
+	cfg => {
+	    destination => '/var/backups/nbackup',
+	    nameformat => 'HOSTNAME-%Y%m%d.tar.gz',
+	    #prune => '7 days', 
+	},
+	add => {},
+	exclude => {},
+	match_exclude => {},
+    };
+
+    my $ops = {
+	'+' => 'add', 
+	'-' => 'exclude',
+	'~' => 'match_exclude',
+    };
+
+    open my $fh, '<', $config_file or die "Could not open '$config_file': $!\n";
+    while (my $line = <$fh>) {
+	chomp $line;
+
+	if ($line =~ /^#/) {
+	} elsif ($line =~ /^(nameformat|destination|prune)\:\s*(.+?)$/) {
+	    $backup->{cfg}->{$1} = $2;
+	} elsif ($line =~ /^\s*([\-\+\~])\s*(.+?)\/*$/) {
+	    my $op = $ops->{$1};
+
+	    die "Unknown operation `$1'" unless $op; 
+
+	    $backup->{$op}->{$2} = 1;
+	} 
+    }
+
+    close $fh;
+
+    return $backup;
+}
+
+sub calc_prune {
+    my ($prune) = @_;
+
+    return 0 unless $prune;
+
+    my $periods = {
+	week => 86400 * 7,
+	day => 86400,
+	hour => 3600,
+	minute => 60,
+	second => 1,
+    };
+
+    if ($prune =~ /^(\d+)\s+(week|day|hour|minute|second)s?$/) {
+	return $1 * $periods->{$2};
+    }
+
+    warn "Unknown time period\n";
+    return 0;
+}

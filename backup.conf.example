@@ -1,0 +1,19 @@
+# backup destination directory
+destination: /var/backups/nbackups
+
+# format of the backup filename (passed to strftime)
+nameformat: HOSTNAME-%Y-%m-%d.tar.gz
+
+# remove backups older than this 
+prune: 1 week
+
+# files/dirs to add to the archive
++ /etc/apache2/
++ /var/www/
+
+# files/dirs to exclude
+- /etc/apache2/sites-enabled/
+
+# files/dirs to exclude based on regex match
+~ CVS
+
